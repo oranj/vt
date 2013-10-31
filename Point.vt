@@ -1,0 +1,62 @@
+#import Math
+
+Point
+
+	x:Number @get
+	y:Number @get
+
+	Point(x:Number, y:Number)
+		this.x = x
+		this.y = y
+
+#	+(b:Point):Point
+#		Point(x + b.x, y + b.y)
+#
+#	+(b:Number):Point
+#		Point(x + b, y + b)
+#
+#	-(b:Point):Point
+#		Point(x - b.x, y - b.y)
+#
+#	-(b:Number):Point
+#		Point(x - b, y - b)
+#
+#	*(scalar:Number):Point {
+#		Point(x * Number, y * Number)
+
+	privateFn():Void @private
+
+
+	magnitude():Number
+		Math.sqrt((x * x) + (y * y))
+
+	distance(that:Point):Number
+		(that - this).magnitude()
+
+
+	center(points:Collection<Point>):Point @static
+		Number length = points.length()
+		Number x = 0, y = 0, i
+
+		for (i in [0 ... 12])
+
+		for (i in [12 ... 0])
+
+		while true
+			# do something
+			# do something else
+
+		[0 ... 12] | (i:Number):Void
+
+		# array_map |
+		# array_filter :
+
+		Point(x / length, y / length)
+
+		points | (a:Point):Void
+			x += a.x
+			y += a.y
+
+
+	maxDistance(points:Collection<Point>):Number
+		(points | this.distance).min()

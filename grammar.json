@@ -1,0 +1,150 @@
+{
+	"root": "FunctionDefinition<0>",
+	"cfg": {
+		"DepthBlock<Depth>": [
+			"\n/[\t]{Depth}/"
+		],
+		"Var": [
+			"/[a-z][a-zA-Z]*/"
+		],
+		"Class": [
+			"/[A-Z][a-zA-Z]*/",
+			"${Class}<${ClassList}>"
+		],
+		"ClassList": [
+			"${Class}",
+			"${Class}, ${ClassList}"
+		],
+		"SQString": [
+			"",
+			"/[^\\']+/",
+			"${SQString}'${SQString}"
+		],
+		"DQString": [
+			"",
+			"/[^\\\"]+/",
+			"${DQString}\"${DQString}"
+		],
+		"String": [
+			"'${SQString}'",
+			"\"${DQString}\""
+		],
+		"Decimal": [
+			"/[0-9]+/"
+		],
+		"Binary": [
+			"0b/[01]+/"
+		],
+		"Hex": [
+			"0x/[0-9a-fA-F]+/"
+		],
+		"Null": [
+			"nil"
+		],
+		"Boolean": [
+			"true",
+			"false"
+		],
+		"BinaryOperator": [
+			"+",
+			"-",
+			"*",
+			"/",
+			"^",
+			"%",
+			"?:"
+		],
+		"Number": [
+			"${Decimal}",
+			"${Binary}",
+			"${Hex}",
+			"${Decimal}.${Decimal}",
+			"${Binary}.${Binary}",
+			"${Hex}.${Hex}"
+		],
+		"Flag": [
+			"@[a-z]+"
+		],
+		"FlagList": [
+			"",
+			"${Flags}"
+		],
+		"Flags": [
+			"${Flag}",
+			"${Flag}, ${Flag}"
+		],
+		"FunctionName": [
+			"/[a-z][a-zA-Z]+/"
+		],
+		"ClassName": [
+			"/[a-z][a-zA-Z]+/"
+		],
+		"Argument": [
+			"${Var}:${Class}"
+		],
+		"ArgumentList": [
+			"${Argument}",
+			"${Argument}, ${ArgumentList}"
+		],
+		"FunctionArguments": [
+			"",
+			"${ArgumentList}"
+		],
+		"FunctionDefinition<Depth>": [
+			"${DepthBlock<Depth>}${FunctionName} ( ${FunctionArguments} ) : ${Class) ${FlagList} ${StatementBlock<Depth+1>}"
+		],
+		"StatementBlock<Depth>": [
+			"${DepthBlock<Depth>}${Statement} ",
+			"${StatementBlock<Depth>}${StatementBlock<Depth>}"
+		],
+		"BinaryOperation": [
+			"${Value} ${BinaryOperator} ${Value}"
+		],
+		"UnaryOperation": [
+			"${UnaryOperator} ${Value}"
+		],
+		"TernaryOperation": [
+			"${Value} ? ${Value} : ${Value}"
+		],
+
+		"Value": [
+			"${Null}",
+			"${Boolean}",
+			"${Number}",
+			"${String}",
+
+			"${Var}",
+			"(${Value})",
+			"${VarAssignment}",
+			"${FunctionCall}",
+			"${NewVar}"
+		],
+		"VarAssignment": [
+			"${Var} = ${Value}"
+		],
+		"VarList": [
+			"${Var}",
+			"${Var} = ${Value}",
+			"${Var} , ${VarList}"
+		],
+		"VarDeclaration": [
+			"${Class} ${VarList}"
+		],
+		"Statement": [
+			"${VarDeclaration}",
+			"${Value}"
+		],
+		"ClassDefinition<Depth>": [
+			"${DepthBlock<Depth>}class ClassName ClassBlock<Depth+1>"
+		],
+		"MemberVariable<Depth>": [
+			"${DepthBlock<Depth>}${Var}:${Class} ${FlagList}"
+		],
+		"ClassBlock<Depth>": [
+			"\n",
+			"${MemberVariable}",
+			"${FunctionDefinition}"
+		]
+
+	}
+}

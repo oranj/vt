@@ -1,0 +1,986 @@
+#! /usr/bin/php
+<?php
+
+class VTParserException extends Exception {
+	#private $line;
+	private $location;
+
+	public function __construct($message, $location, $code = 0) {
+		parent::__construct($message, $code);
+
+		$this->location = $location;
+	}
+
+	public function __toString() {
+		$code = $this->location->showCode();
+		return parent::__toString()."\n".$code;
+	}
+}
+
+class VTParserLocation {
+	private $line;
+	private $char;
+	private $file;
+
+	public function __construct($line, $char, $filename) {
+		$this->line = $line;
+		$this->char = $char;
+		$this->file = $filename;
+	}
+
+	private static function printLine($lineNumber, $lines, $marker=false) {
+		if (isset($lines[$lineNumber-1])) {
+			$gutterWidth = strlen(count($lines));
+			$out = "\033[47;30m".sprintf(" %0${gutterWidth}d ", $lineNumber)."\033[m ".str_replace("\t", " ", $lines[$lineNumber - 1])."\n";
+			if ($marker !== false) {
+				$out .= str_repeat(' ', $gutterWidth + 3);
+				for ($i = 1; $i < $marker; $i++) {
+					$out .= ' ';
+				}
+				$out .= "\033[36m^\033[0m\n";
+			}
+			return $out;
+		}
+	}
+
+	public function showCode() {
+		$contents = file_get_contents($this->file);
+		$lines = explode("\n", $contents);
+
+		$out = "\n";
+		$out .= self::printLine($this->line-1, $lines);
+		$out .= self::printLine($this->line, $lines, $this->char);
+		$out .= self::printLine($this->line+1, $lines);
+		$out .= "\n";
+
+		return $out;
+	}
+
+	public function throwException($message, $code = 0) {
+		throw new VTParserException($message, $this, $code);
+	}
+
+}
+
+class VTParserToken {
+	private $type;
+	private $data;
+	private $location;
+
+	public function __construct($type, $data, $location) {
+		$this->type = $type;
+		$this->data = $data;
+		$this->location = $location;
+	}
+
+	public function is($type) {
+		return $this->type == $type;
+	}
+
+	public function matchKey($key, $value) {
+		return isset($this->data[$key]) && $this->data[$key] == $value;
+	}
+
+	public function __get($key) {
+		if ($key == 'type') {
+			return $this->type;
+		}
+		if (isset($this->data[$key])) {
+			return $this->data[$key];
+		}
+		return null;
+	}
+
+	public function matchesData($input) {
+		foreach ($input as $key => $value) {
+			if (! $this->matchKey($key, $value)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	public function matchTypeData($type, $data) {
+		if ($this->type == $type) {
+			return $this->matchesData($data);
+		}
+		return false;
+	}
+
+	public function getLocation() {
+		return $this->location;
+	}
+
+	public function throwException($message, $code = 0) {
+		$this->location->throwException($message, $code);
+	}
+
+}
+
+class VTParser {
+	private $filename;
+	private $contents;
+	private $lineNo;
+	private $charNo;
+	private $tokenList;
+
+
+	private $operators = array(
+		'binary' => array(
+			'PLUS'      => '+',
+			'LTHAN'     => '<',
+			'GTHAN'     => '>',
+			'LTHANEQ'   => '<=',
+			'GTHANEQ'   => '>=',
+			'BINAND'    => '&',
+			'BOOLAND'   => '&&',
+			'BOOLOR'    => '||',
+			'BINOR'     => '|',
+			'EXP'       => '^',
+			'MOD'       => '%',
+			'BOOLEQ'    => '==',
+			'MINUS'     => '-',
+			'MULT'      => '*',
+			'DIVIDE'    => '/',
+			'EXPAND'    => '...',
+			'SHORTTERN' => '?:'
+		),
+		'unarypre' => array(
+			'PLUSPLUS'   => '++',
+			'MINUSMINUS' => '--',
+		),
+		'unarypost' => array(
+			'PLUSPLUS'   => '++',
+			'MINUSMINUS' => '--'
+		),
+		'etc' => array(
+			'COMMA' => ',',
+			'TERNARY' => '?',
+			'COLON' => ':',
+			'LPAREN' => '(',
+			'RPAREN' => ')'
+		)
+	);
+
+	public function __construct($filename) {
+		$this->filename = $filename;
+		$this->contents = file_get_contents($filename);
+		$this->tokens = $this->getOperators();
+
+		$this->lineNo = 1;
+		$this->charNo = 0;
+	}
+
+	private static function recursiveMerge($array) {
+		$out = array();
+		foreach ($array as $key => $values) {
+			if (is_array($values)) {
+				$flattenedChildren = self::recursiveMerge($values);
+				foreach ($flattenedChildren as $k => $value) {
+					$out [$k]= $value;
+				}
+			} else {
+				$out [$key]= $values;
+			}
+		}
+		return $out;
+	}
+
+	private function getOperators() {
+		return $this->recursiveMerge($this->operators);
+	}
+
+
+	private static $tokens = array();
+
+	private static $statements = array(
+		'FOR'    => 'for',
+		'SWITCH' => 'switch',
+		'CASE'   => 'case',
+		'BREAK'  => 'break',
+		'WHILE'  => 'while',
+		'IF'     => 'if',
+		'IN'     => 'in',
+	);
+
+	private static $declarations = array(
+		'TYPE'   => 'type',
+		'IMPORT' => 'import'
+	);
+
+
+	private static $stack;
+
+	public static function treeDepth() {
+		return count(self::$stack);
+	}
+
+	public static function treePeek() {
+		return self::$stack[self::treeDepth() - 1];
+	}
+
+	public static function treePop() {
+		return array_pop(self::$stack);
+	}
+
+	public static function isClassName($string) {
+		return preg_match('/^[A-Z][a-zA-Z]*$/', trim($string));
+	}
+
+	public static function isFunctionName($string) {
+		return preg_match('/^[a-z][a-zA-Z]*$/', trim($string));
+	}
+
+	public function findToken($line, &$pointer) {
+		foreach ($this->tokens as $type => $symbol) {
+			if (substr($line, $pointer, strlen($symbol)) == $symbol) {
+				$pointer += strlen($symbol) - 1;
+				return $type;
+			}
+		}
+		return false;
+	}
+
+	public static function charIsStatementBreak($line, $pointer) {
+		if ($pointer < 0) { return true; }
+		if ($pointer >= strlen($line)) { return true; }
+
+		$char = $line[$pointer];
+		if ($char == "\n" || $char == ' ' || $char == '(') {
+			return true;
+		}
+		return false;
+	}
+
+	public static function findStatement($line, &$pointer) {
+		if (! self::charIsStatementBreak($line, $pointer - 1)) {
+			return false;
+		}
+		#print_r(self::$statements);
+		foreach ( self::$statements as $type => $symbol ) {
+			$substr = substr($line, $pointer, strlen($symbol));
+			if (strtolower($substr) == $symbol) {
+				$end = $pointer + strlen($symbol) - 1;
+				if (self::charIsStatementBreak($line, $end + 1)) {
+					if ($substr != $symbol) {
+						echo "For reals, though, you should probably check your case... $substr\n";
+					}
+					$pointer = $end;
+					return $type;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static function addToLine($type, $lineNo, $charNo, $filename, &$output, $data = array()) {
+		$data['type'] = $type;
+		$data['file'] = $filename;
+		$data['line'] = $lineNo;
+		$data['char'] = $charNo;
+
+		$output []= $data;
+	}
+
+	private function registerToken($type, $data = array()) {
+		$out = new VTParserToken($type, $data, $this->getLocation());
+		$this->tokenList []= $out;
+		return $out;
+	}
+
+	private function getLocation() {
+		return new VTParserLocation($this->lineNo, $this->charNo, $this->filename);
+	}
+
+	private function throwException($message, $code = 0) {
+		throw new VTParserException($message, $this->getLocation(), $code);
+	}
+
+	public function registerString($string) {
+		return $this->registerToken('string', array('string' => $string));
+	}
+
+	public function registerFlag($flag) {
+		if (($flag = trim($flag))) {
+			return $this->registerToken('flag', array('flag' => $flag));
+		}
+		$this->throwException("Invalid flag");
+	}
+
+	public function registerStatement($statement) {
+		if (($statement = trim($statement))) {
+			return $this->registerToken('statement', array('statement' => $statement));
+		}
+	}
+
+	public function registerOperator($operator) {
+		if (($operator = trim($operator))) {
+			return $this->registerToken('operator', array('operator' => $operator));
+		}
+		$this->throwException("Invalid operator");
+	}
+
+	public function registerBlock($method) {
+		return $this->registerToken('block', array('method' => $method));
+	}
+
+	public function registerEnd() {
+		$tokenCount = count($this->tokenList);
+		if ($tokenCount == 0 || $this->tokenList[$tokenCount - 1]->is('end')) {
+			return false;
+		}
+		return $this->registerToken('end');
+	}
+
+	public static function escapeCharacter($character) {
+		switch ($character) {
+			case 'n':
+				return "\n";
+			case 't':
+				return "\t";
+			default:
+				return $character;
+
+		}
+	}
+
+	public static function parseTypeList($lexemes, &$start, &$output = array()) {
+		$expectingType = true;
+		$typeList= array();
+
+		for ($i = $start; $i < count($lexemes); $i++) {
+			if ($expectingType) {
+				if (! self::parseType($lexemes, $i, $type)) {
+					return false;
+				}
+				$typeList []= $type;
+				$next = $lexemes[$i+1];
+				if ($next->matchTypeData('operator', array('operator'=>'COMMA'))) {
+					$i++;
+					$expectingType = true;
+				} else {
+					$expectingType = false;
+					$start = $i;
+					$output = $typeList;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	public static function parseType($lexemes, &$start, &$output = array()) {
+		$className = null;
+
+		$shouldBeClassName = true;
+
+		$couldBeSubClass = false;
+		$couldCloseSubClass = false;
+		$couldCommaSubClass = false;
+		$couldBeFinished = false;
+
+		$good = false;
+
+		$subTypes = array();
+
+		for ($i = $start; $i < count($lexemes); $i++) {
+			$lexeme = $lexemes[$i];
+
+			if ($shouldBeClassName) {
+				if (!($lexeme->is('statement') && self::isClassName($lexeme->statement))) {
+					return false;
+				}
+				$className = $lexeme->statement;
+				$couldBeSubClass = true;
+				$shouldBeClassName = false;
+				$couldBeFinished = true;
+			} else if ($couldBeFinished || $couldBeSubClass) {
+
+				if ($couldBeFinished &&
+					($lexeme->is('operator') && in_array($lexeme->operator, array('COMMA', 'RPAREN', 'GTHAN'))) || ($lexeme->is('end'))) {
+					$good = true;
+					break;
+				}
+				if ($couldBeSubClass && $lexeme->matchTypeData('operator', array('operator' => 'LTHAN'))) {
+					$i++;
+					if (! self::parseTypeList($lexemes, $i, $subTypes)) {
+						return false;
+					}
+					$good = true;
+					break;
+				}
+
+				return false;
+			}
+		}
+
+
+
+		if ($good) {
+			$start = $i - 1;
+			$output = array(
+				'type' => $className
+			);
+			if ($subTypes) {
+				$output['subTypes'] = $subTypes;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	public static function parseFunctionDefinition($lexemes, &$start, &$output = array()) {
+		$functionName = null;
+		$args = array();
+		$returnType = null;
+
+
+
+		$currentArgName = null;
+		$currentArgType = null;
+
+		$shouldBeFunctionName = true;
+		$shouldBeOpenParens = false;
+
+		$shouldBeArgName = false;
+		$couldBeArgComma = false;
+		$couldBeCloseParens = false;
+		$couldBeNextArgs = false;
+
+		$shouldBeType = false;
+		$shouldBeReturnType = false;
+
+		for ($i = $start; $i < count($lexemes); $i++) {
+			$lexeme = $lexemes[$i];
+
+			if ($shouldBeType || $shouldBeReturnType) {
+				if (! self::parseType($lexemes, $i, $type)) {
+					echo "not type\n";
+					return false;
+				}
+				if ($shouldBeType) {
+					$args []= array(
+						'name' => $currentArgName,
+						'type' => $type
+					);
+					$shouldBeType = false;
+					$couldBeCloseParens = true;
+					$couldBeNextArgs = true;
+				} else {
+					$returnType = $type;
+					$start = $i;
+					$output = array(
+						'name' => $functionName,
+						'args' => $args,
+						'type' => $returnType
+					);
+					return true;
+				}
+			} else if ($shouldBeArgName || $couldBeCloseParens || $couldBeNextArgs) {
+				#echo "> B\n";
+				if ($couldBeNextArgs) {
+					if ($lexeme->matchTypeData('operator', array('operator' => 'COMMA'))) {
+						$shouldBeArgName = true;
+						$couldBeNextArgs = false;
+						$couldBeCloseParens = false;
+						continue;
+					}
+				}
+
+				if ($couldBeCloseParens) {
+					if ($lexeme->matchTypeData('operator', array('operator' => 'RPAREN'))) {
+						$shouldBeArgName = false;
+						$couldBeCloseParens = false;
+
+						$i++;
+						$lexeme = $lexemes[$i];
+
+						if ($lexeme->matchTypeData('operator', array('operator' => 'COLON'))) {
+							$shouldBeReturnType = true;
+							continue;
+						} else {
+							echo "not colon name\n";
+							return false;
+						}
+
+					}
+				}
+				if ($shouldBeArgName) {
+					if (! ($lexeme->is('statement'))) {
+						echo "not arg name\n";
+						return false;
+					}
+
+					$currentArgName = $lexeme->statement;
+
+					$i++;
+					$lexeme = $lexemes[$i];
+
+					if (! ($lexeme->matchTypeData('operator', array('operator' => 'COLON')))) {
+						echo "FAILED HERE: " .__LINE__."\n";
+						return false;
+					}
+
+					$couldBeCloseParens = false;
+					$shouldBeArgName = false;
+					$shouldBeType = true;
+				}
+			} else if ($shouldBeOpenParens) {
+				#echo "> C\n";
+				print_r($lexeme);
+				if (! ($lexeme->matchTypeData('operator', array('operator' => 'LPAREN')))) {
+
+					echo "FAILED HERE: " .__LINE__."\n";
+					return false;
+				}
+				$shouldBeOpenParens = false;
+				$shouldBeArgName = true;
+				$couldBeCloseParens = true;
+			} else if ($shouldBeFunctionName ) {
+				#echo "> D\n";
+				if (! $lexeme->is('statement')) {
+					echo "not function name\n";
+					return false;
+				}
+				$functionName = $lexeme->statement;
+
+				$shouldBeFunctionName = false;
+				$shouldBeOpenParens = true;
+			}
+		}
+	}
+
+	public static function parseStatement($lexemes, &$start, &$output = array()) {
+		$statement = array();
+		for ($i = $start; $i < count($lexemes); $i++) {
+			$lexeme = $lexemes[$i];
+			if ($lexeme['type'] == 'token') {
+
+			}
+
+		}
+		return false;
+	}
+
+	public static function parseFunctionCallArgs($lexemes, &$start, &$output = array()) {
+		$expectingStatement = true;
+		$couldBeDone = false;
+		$couldBeComma = false;
+		$statements = array();
+		for ($i = $start; $i < count($lexemes); $i++) {
+			$lexeme = $lexemes[$i];
+			if ($expectingStatement) {
+				if (! self::parseStatement($lexemes, $i, $statement)) {
+					return false;
+				}
+				$statements []= $statement;
+				$couldBeDone = true;
+				$expectingStatement = false;
+				$couldBeComma = true;
+			} else if ($couldBeComma || $couldBeDone) {
+				if ($couldBeDone && $lexeme['type'] == 'token' && $lexeme['token'] == 'RPAREN') {
+					$start = $i - 1;
+					$output = $statements;
+					return true;
+				} else if ($couldBeComma && $lexeme['type'] == 'token' && $lexeme['token'] == 'COMMA') {
+					$couldBeComma = false;
+					$couldBeDone = false;
+					$expectingStatement = true;
+				}
+			}
+
+		}
+		return false;
+	}
+
+	public static function parseFunctionCall($lexemes, &$start, &$output = array()) {
+		$shouldBeFunctionName = true;
+		$shouldBeOpenParens = false;
+		$couldBeCloseParens = false;
+		$couldBeArgsList = false;
+
+		$functionName = null;
+		$arguments = array();
+
+		for ($i = $start; $i < count($lexemes); $i++) {
+			$lexeme = $lexemes[$i];
+
+			if ($shouldBeFunctionName) {
+				if ($lexeme->type == 'statement' && self::isFunctionName($lexeme->statement)) {
+					$shouldBeOpenParens = true;
+					$shouldBeFunctionName = false;
+					$functionName = $lexeme->statement;
+				} else {
+					return false;
+				}
+			} else if ($shouldBeOpenParens) {
+				if ($lexeme->matchTypeData('token', array('token' => 'LPAREN'))) {
+					$couldBeCloseParens = true;
+					$couldBeArgsList = true;
+
+					$shouldBeOpenParens = false;
+				} else {
+					return false;
+				}
+			} else if ($couldBeCloseParens || $couldBeArgsList) {
+				if ($couldBeCloseParens && $lexeme->matchTypeData('token', array('token' => 'RPAREN'))) {
+					$start = $i;
+					$output = array(
+						'function' => $functionName,
+						'args' => $arguments
+					);
+					return true;
+				}
+				if ($couldBeArgsList) {
+					if (self::parseFunctionCallArgs($lexemes, $i, $arguments)) {
+						$couldBeArgsList = false;
+						$couldBeCloseParens = true;
+						continue;
+					}
+				}
+				return false;
+			}
+		}
+
+		return false;
+	}
+
+	public function parse($lexemes, &$start = 0, &$output = array()) {
+		$root = CodeNode::makeRoot();
+		$node = $root->pushChild();
+		$lastStatement = null;
+
+
+		$matchesFunctionDef = false;
+		$matchesFunctionCall = false;
+
+		for ($i = $start; $i < count($lexemes); $i++) {
+			$lexeme = $lexemes[$i];
+			if ($lexeme->is('block')) {
+				if ($lastStatement) {
+					$lexeme->throwException("Unterminated expression");
+				}
+
+				if ($lexeme['method'] == 'POP') {
+					$node = $node->getParent();
+				} else {
+					$node = $node->pushChild();
+				}
+			} else if ($lexeme->is('end')) {
+				if ($lastStatement) {
+					$lexeme->throwException("Unterminated expression");
+				}
+
+				$node = $node->pushSibling();
+			} else {
+				if ($lexeme->is('statement')) {
+					$output = array();
+					if (self::parseFunctionDefinition($lexemes, $i, $output)) {
+						$node->addCommand(array(
+							'action' => 'defineFn',
+							'signature' => $output
+						));
+						print_r($output);
+					} else if (self::parseFunctionCall($lexemes, $i, $output)) {
+						print_r($output);
+					}
+				}
+			}
+		}
+
+		print_r($root);
+
+		return $root;
+	}
+
+	public function charIncrement() {
+		return $this->charNo ++;
+	}
+
+	public function lineIncrement() {
+		$this->charNo = 1;
+		return $this->lineNo++;
+	}
+
+
+	public function lex() {
+
+		$contents = $this->contents;
+		$filename = $this->filename;
+
+		$buffer = '';
+		$escaped = false;
+		$inDblQuotes = false;
+		$inSglQuotes = false;
+		$inBlockComment = false;
+		$sglQuoteStart = null;
+		$dblQuoteStart = null;
+		$blockCommentStart = null;
+		$inFlag = false;
+		$inLineComment = false;
+		$depth = 0;
+
+		$lineNo = 1;
+		$charNo = 1;
+
+		$output = array();
+		for ($i = 0; $i < strlen($contents); $i++) {
+			$c = $contents[$i];
+
+			#echo ">> $i / $c: ";
+
+			if ($c == "\n") {
+				$this->lineIncrement();
+			}
+
+			if ($inLineComment) {
+				#echo "a \n";
+				if ($c == "\n") {
+					$inLineComment = false;
+				}
+			} else if ($inBlockComment) {
+				#echo "b \n";
+				if (! $escaped && $c == '*' && strlen($contents) -1 > $i && $contents[$i+1] == '/'){
+					$inBlockComment = false;
+					$buffer = '';
+
+					$i++;
+					$this->charIncrement();
+				}
+			} else if (! $escaped && ($c == '#' || ($i < (strlen($contents) - 1) && $c == '/' && $contents[$i+1] == '/'))) {
+				#echo "c \n";
+
+				$this->registerStatement($buffer);
+				$inLineComment = true;
+				$buffer = '';
+			} else if (($inSglQuotes || $inDblQuotes) && $c == '\\' && ! $escaped) {
+				#echo "d \n";
+				$escaped = true;
+			} else if ($inSglQuotes) {
+				#echo "e \n";
+				if ($escaped) {
+					$buffer .= self::escapeCharacter( $c);
+					$escaped = false;
+				} else if ($c == "'") {
+					$inSglQuotes = false;
+					$this->registerString($buffer);
+					$buffer = '';
+				} else {
+					$buffer .= $c;
+				}
+			} else if ($inDblQuotes) {
+				#echo "f \n";
+				if ($escaped) {
+					$buffer .= self::escapeCharacter($c);
+					$escaped = false;
+				} else if ($c == '"') {
+					$inDblQuotes = false;
+					$this->registerString($buffer);
+					$buffer = '';
+				} else {
+					$buffer .= $c;
+				}
+			} else if ($inFlag) {
+				#echo "g \n";
+				if ($c == ' ' || $c == "\t" || $c == "\n") {
+					$this->registerFlag($buffer);
+					$buffer = '';
+					$inFlag = false;
+				} else if (! ctype_lower($c)) {
+					$this->throwException("Invalid character in flag");
+				} else {
+					$buffer .= $c;
+				}
+			} else if ($c == '"') {
+				#echo "h \n";
+				$this->registerStatement($buffer);
+				$buffer = '';
+				$inDblQuotes = true;
+				$dblQuoteStart = $this->getLocation();
+			} else if ($c == "'") {
+				#echo "i \n";
+				$this->registerStatement($buffer);
+				$buffer = '';
+				$inSglQuotes = true;
+				$sglQuoteStart = $this->getLocation();
+			} else if (! $escaped && $c == '/' && strlen($contents)-1 > $i && $contents[$i+1] == '*') {
+				#echo "j \n";
+				$this->registerStatement($buffer);
+				$buffer = '';
+				$inBlockComment = true;
+				$blockCommentStart = $this->getLocation();
+			} else if ($c == "\n") {
+				#echo "k \n";
+				if ($inLineComment) {
+					$inLineComment = false;
+				}
+				$nextDepth = 0;
+				while (isset($contents[$i+1]) && $contents[$i+1] == "\t") {
+					$nextDepth ++;
+					$i++;
+					$this->charIncrement();
+				}
+
+				$this->registerStatement($buffer);
+				$buffer = '';
+				if ($nextDepth == ($depth + 1)) {
+					$this->registerBlock('PUSH');
+				} else if ($nextDepth < $depth) {
+					for ($j = $nextDepth; $j < $depth; $j++) {
+						$this->registerBlock("POP");
+					}
+				} else if ($nextDepth > $depth) {
+					$this->throwException("Trying to go too deep");
+				} else {
+					$this->registerEnd();
+				}
+
+				$depth = $nextDepth;
+			} else if ((! $escaped) && ($c == '@')) {
+				#echo "l \n";
+				$this->registerStatement($buffer);
+				$buffer = '';
+				$inFlag = true;
+			} else if (($token = $this->findToken($contents, $i)) !== false) {
+				#echo "m \n";
+				$this->registerStatement($buffer);
+				$buffer = '';
+				$this->registerOperator($token);
+			} else if (($statement = self::findStatement($contents, $i)) !== false) {
+				#echo "n \n";
+				$this->registerStatement($buffer);
+				$buffer = '';
+				$this->registerStatement($statement);
+			} else {
+				#echo "o \n";
+				$buffer .= $c;
+			}
+			$this->charIncrement();
+		}
+		if ($inSglQuotes) {
+			throw new VTParserException("Mismatched single quotes started", $sglQuoteStart);
+		} else if ($inDblQuotes) {
+			throw new VTParserException("Mismatched double quotes started", $dblQuoteStart);
+		} else if ($inBlockComment) {
+			throw new VTParserException("Mismatched block comments", $blockCommentStart);
+		}
+
+		$this->registerStatement($buffer);
+		return $this->tokenList;
+	}
+
+	public static function pushChild() {
+
+		$current_node = self::treePeek();
+		$child = new CodeNode();
+
+		$current_node->addChild($child);
+		self::$stack []= $child;
+
+		return $child;
+	}
+
+	public static function nodeUp() {
+		$child = self::treePop();
+		return self::treePeek();
+	}
+
+
+	static function findDepth($line) {
+		for ($i = 0; $i < strlen($line); $i++) {
+			if ($line[$i] != "\t") {
+				return $i;
+			}
+		}
+	}
+	static function cleanLine($line, &$depth = 0) {
+		$checkDepth = true;
+		for ($i = 0; $i < strlen($line); $i++) {
+			if ($checkDepth && $line[$i] != "\t") {
+				$checkDepth = false;
+				$depth = $i;
+			}
+
+			if ($i > 1 && $line[$i] == '/' && $line[$i - 1] == '/'){
+				return trim(substr($line, 0, $i - 1));
+			}
+			if ($line[$i] == '#') {
+				return trim(substr($line, 0, $i));
+			}
+		}
+		return trim($line);
+	}
+}
+
+class CodeNode {
+
+	private $commands = array();
+	private $children = array();
+	private $parent = null;
+
+	private static $stack;
+
+	public function __construct($parentNode) {
+		$this->parent = $parentNode;
+	}
+
+	public static function makeRoot() {
+		return new CodeNode(null);
+	}
+
+	public function getParent() {
+		return $this->parent;
+	}
+
+	public function pushChild() {
+		$child = new CodeNode($this);
+		$this->children []= $child;
+		return $child;
+	}
+
+	public function pushSibling() {
+		return $this->parent->pushChild();
+	}
+
+	public function isEmpty() {
+		return (bool)(count($this->commands) + count($this->children));
+	}
+
+	public function getDepth() {
+		$depth = 0;
+		$node = $this;
+		while (! is_null($node)) {
+			$node = $node->getParent();
+			$depth ++;
+		}
+		return $depth;
+	}
+
+	public function addCommand($command) {
+		$this->commands []= $command;
+	}
+
+	public function clean() {
+		$nextChildren = array();
+		foreach ($this->children as $child) {
+			if (! $child->isEmpty()) {
+				$child->clean();
+				$nextChildren []= $child;
+			}
+		}
+		$thils->children = $nextChildren;
+	}
+}
+
+
+function parseFile($filename) {
+	$contents = file_get_contents($filename);
+	$parser = new VTParser($filename);
+
+	$analysis = $parser->lex($contents, $filename);
+
+
+	return $parser->parse($analysis);
+}
+
+print_r(parseFile($argv[1]), true);
